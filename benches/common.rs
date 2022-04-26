@@ -1,3 +1,4 @@
+#![feature(generic_associated_types)]
 use redb::ReadableTable;
 use redb::TableDefinition;
 use std::fs;
@@ -8,20 +9,26 @@ use std::path::Path;
 const X: TableDefinition<[u8], [u8]> = TableDefinition::new("x");
 
 pub trait BenchDatabase {
-    type W: for<'a> BenchWriteTransaction<'a>;
-    type R: for<'a> BenchReadTransaction<'a>;
+    type W<'db>: BenchWriteTransaction
+    where
+        Self: 'db;
+    type R<'db>: BenchReadTransaction
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str;
 
-    fn write_transaction(&mut self) -> Self::W;
+    fn write_transaction(&mut self) -> Self::W<'_>;
 
-    fn read_transaction(&self) -> Self::R;
+    fn read_transaction(&self) -> Self::R<'_>;
 }
 
-pub trait BenchWriteTransaction<'a> {
-    type T: BenchInserter + 'a;
+pub trait BenchWriteTransaction {
+    type W<'txn>: BenchInserter
+    where
+        Self: 'txn;
 
-    fn get_inserter(&'a self) -> Self::T;
+    fn get_inserter(&mut self) -> Self::W<'_>;
 
     #[allow(clippy::result_unit_err)]
     fn commit(self) -> Result<(), ()>;
@@ -35,75 +42,104 @@ pub trait BenchInserter {
     fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
 }
 
-pub trait BenchReadTransaction<'a> {
-    type Output: AsRef<[u8]> + 'a;
+pub trait BenchReadTransaction {
+    type T<'txn>: BenchReader
+    where
+        Self: 'txn;
 
-    fn get(&'a self, key: &[u8]) -> Option<Self::Output>;
+    fn get_reader(&self) -> Self::T<'_>;
+}
+
+pub trait BenchReader {
+    type Output<'a>: AsRef<[u8]> + 'a
+    where
+        Self: 'a;
+
+    fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>>;
 
     // TODO: change this to a method that iterates over a range, for a more complete benchmark
-    fn exists_after(&'a self, key: &[u8]) -> bool;
+    fn exists_after(&self, key: &[u8]) -> bool;
 }
 
-pub struct RedbBenchDatabase<'a> {
-    db: &'a redb::Database,
+pub struct RedbBenchDatabase<'db> {
+    db: &'db redb::Database,
 }
 
-impl<'a> RedbBenchDatabase<'a> {
+impl<'db> RedbBenchDatabase<'db> {
     #[allow(dead_code)]
-    pub fn new(db: &'a redb::Database) -> Self {
+    pub fn new(db: &'db redb::Database) -> Self {
         RedbBenchDatabase { db }
     }
 }
 
-impl<'a> BenchDatabase for RedbBenchDatabase<'a> {
-    type W = RedbBenchWriteTransaction<'a>;
-    type R = RedbBenchReadTransaction<'a>;
+impl<'db> BenchDatabase for RedbBenchDatabase<'db> {
+    type W<'a> = RedbBenchWriteTransaction<'a>
+    where
+        Self: 'a;
+    type R<'a> = RedbBenchReadTransaction<'a>
+    where
+        Self: 'a;
 
     fn db_type_name() -> &'static str {
         "redb"
     }
 
-    fn write_transaction(&mut self) -> Self::W {
+    fn write_transaction(&mut self) -> Self::W<'_> {
         let txn = self.db.begin_write().unwrap();
         RedbBenchWriteTransaction { txn }
     }
 
-    fn read_transaction(&self) -> Self::R {
-        // let txn = self.db.begin_read().unwrap();
-        // let table = txn.open_table(X).unwrap();
-        // RedbBenchReadTransaction { _txn: txn, table }
-        todo!()
+    fn read_transaction(&self) -> Self::R<'_> {
+        let txn = self.db.begin_read().unwrap();
+        RedbBenchReadTransaction { txn }
     }
 }
 
 pub struct RedbBenchReadTransaction<'a> {
-    _txn: redb::ReadTransaction<'a>,
-    table: redb::ReadOnlyTable<'a, [u8], [u8]>,
+    txn: redb::ReadTransaction<'a>,
 }
 
-impl<'a, 'b> BenchReadTransaction<'b> for RedbBenchReadTransaction<'a> {
-    type Output = &'b [u8];
+impl<'db> BenchReadTransaction for RedbBenchReadTransaction<'db> {
+    type T<'txn> = RedbBenchReader<'txn>
+    where
+        Self: 'txn;
 
-    fn get(&'b self, key: &[u8]) -> Option<&'b [u8]> {
+    fn get_reader(&self) -> Self::T<'_> {
+        let table = self.txn.open_table(X).unwrap();
+        RedbBenchReader { table }
+    }
+}
+
+pub struct RedbBenchReader<'txn> {
+    table: redb::ReadOnlyTable<'txn, [u8], [u8]>,
+}
+
+impl<'txn> BenchReader for RedbBenchReader<'txn> {
+    type Output<'a> = &'a [u8]
+    where
+        Self: 'a;
+
+    fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.table.get(key).unwrap()
     }
 
-    fn exists_after(&'b self, key: &[u8]) -> bool {
+    fn exists_after(&self, key: &[u8]) -> bool {
         self.table.range(key..).unwrap().next().is_some()
     }
 }
 
-pub struct RedbBenchWriteTransaction<'a> {
-    txn: redb::WriteTransaction<'a>,
+pub struct RedbBenchWriteTransaction<'db> {
+    txn: redb::WriteTransaction<'db>,
 }
 
-impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
-    type T = RedbBenchInserter<'b>;
+impl<'db> BenchWriteTransaction for RedbBenchWriteTransaction<'db> {
+    type W<'txn> = RedbBenchInserter<'db, 'txn>
+    where
+        Self: 'txn;
 
-    fn get_inserter(&'b self) -> Self::T {
-        // let table = self.txn.open_table(X).unwrap();
-        // return RedbBenchInserter { table };
-        todo!()
+    fn get_inserter(&mut self) -> Self::W<'_> {
+        let table = self.txn.open_table(X).unwrap();
+        RedbBenchInserter { table }
     }
 
     fn commit(self) -> Result<(), ()> {
@@ -111,11 +147,11 @@ impl<'a, 'b> BenchWriteTransaction<'b> for RedbBenchWriteTransaction<'a> {
     }
 }
 
-pub struct RedbBenchInserter<'a> {
-    table: redb::Table<'a, 'a, [u8], [u8]>,
+pub struct RedbBenchInserter<'db, 'txn> {
+    table: redb::Table<'db, 'txn, [u8], [u8]>,
 }
 
-impl BenchInserter for RedbBenchInserter<'_> {
+impl BenchInserter for RedbBenchInserter<'_, '_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.table.insert(key, value).map_err(|_| ())
     }
@@ -137,37 +173,57 @@ impl<'a> SledBenchDatabase<'a> {
 }
 
 impl<'a> BenchDatabase for SledBenchDatabase<'a> {
-    type W = SledBenchWriteTransaction<'a>;
-    type R = SledBenchReadTransaction<'a>;
+    type W<'db> = SledBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db> = SledBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "sled"
     }
 
-    fn write_transaction(&mut self) -> Self::W {
+    fn write_transaction(&mut self) -> Self::W<'_> {
         SledBenchWriteTransaction {
             db: self.db,
             db_dir: self.db_dir,
         }
     }
 
-    fn read_transaction(&self) -> Self::R {
+    fn read_transaction(&self) -> Self::R<'_> {
         SledBenchReadTransaction { db: self.db }
     }
 }
 
-pub struct SledBenchReadTransaction<'a> {
+pub struct SledBenchReadTransaction<'db> {
+    db: &'db sled::Db,
+}
+
+impl<'db, 'b> BenchReadTransaction for SledBenchReadTransaction<'db> {
+    type T<'txn> = SledBenchReader<'db>
+    where
+        Self: 'txn;
+
+    fn get_reader(&self) -> Self::T<'_> {
+        SledBenchReader { db: self.db }
+    }
+}
+
+pub struct SledBenchReader<'a> {
     db: &'a sled::Db,
 }
 
-impl<'a, 'b> BenchReadTransaction<'b> for SledBenchReadTransaction<'a> {
-    type Output = sled::IVec;
+impl<'a> BenchReader for SledBenchReader<'a> {
+    type Output<'r> = sled::IVec
+    where
+        Self: 'r;
 
-    fn get(&'b self, key: &[u8]) -> Option<sled::IVec> {
+    fn get(&self, key: &[u8]) -> Option<sled::IVec> {
         self.db.get(key).unwrap()
     }
 
-    fn exists_after(&'b self, key: &[u8]) -> bool {
+    fn exists_after(&self, key: &[u8]) -> bool {
         self.db.range(key..).next().is_some()
     }
 }
@@ -177,10 +233,12 @@ pub struct SledBenchWriteTransaction<'a> {
     db_dir: &'a Path,
 }
 
-impl<'a, 'b> BenchWriteTransaction<'b> for SledBenchWriteTransaction<'a> {
-    type T = SledBenchInserter<'b>;
+impl<'a> BenchWriteTransaction for SledBenchWriteTransaction<'a> {
+    type W<'txn> = SledBenchInserter<'txn>
+    where
+        Self: 'txn;
 
-    fn get_inserter(&'b self) -> Self::T {
+    fn get_inserter(&mut self) -> Self::W<'_> {
         SledBenchInserter { db: self.db }
     }
 
@@ -227,36 +285,42 @@ impl<'a> LmdbRkvBenchDatabase<'a> {
 }
 
 impl<'a> BenchDatabase for LmdbRkvBenchDatabase<'a> {
-    type W = LmdbRkvBenchWriteTransaction<'a>;
-    type R = LmdbRkvBenchReadTransaction<'a>;
+    type W<'db> = LmdbRkvBenchWriteTransaction<'db>
+    where
+        Self: 'db;
+    type R<'db> = LmdbRkvBenchReadTransaction<'db>
+    where
+        Self: 'db;
 
     fn db_type_name() -> &'static str {
         "lmdb-rkv"
     }
 
-    fn write_transaction(&mut self) -> Self::W {
+    fn write_transaction(&mut self) -> Self::W<'_> {
         let txn = self.env.begin_rw_txn().unwrap();
         LmdbRkvBenchWriteTransaction { db: self.db, txn }
     }
 
-    fn read_transaction(&self) -> Self::R {
+    fn read_transaction(&self) -> Self::R<'_> {
         let txn = self.env.begin_ro_txn().unwrap();
         LmdbRkvBenchReadTransaction { db: self.db, txn }
     }
 }
 
-pub struct LmdbRkvBenchWriteTransaction<'a> {
+pub struct LmdbRkvBenchWriteTransaction<'db> {
     db: lmdb::Database,
-    txn: lmdb::RwTransaction<'a>,
+    txn: lmdb::RwTransaction<'db>,
 }
 
-impl<'a, 'b> BenchWriteTransaction<'b> for LmdbRkvBenchWriteTransaction<'a> {
-    type T = LmdbRkvBenchInserter<'b>;
+impl<'db> BenchWriteTransaction for LmdbRkvBenchWriteTransaction<'db> {
+    type W<'txn> = LmdbRkvBenchInserter<'txn, 'db>
+    where
+        Self: 'txn;
 
-    fn get_inserter(&'b self) -> Self::T {
+    fn get_inserter(&mut self) -> Self::W<'_> {
         LmdbRkvBenchInserter {
             db: self.db,
-            txn: &self.txn,
+            txn: &mut self.txn,
         }
     }
 
@@ -266,45 +330,57 @@ impl<'a, 'b> BenchWriteTransaction<'b> for LmdbRkvBenchWriteTransaction<'a> {
     }
 }
 
-pub struct LmdbRkvBenchInserter<'a> {
+pub struct LmdbRkvBenchInserter<'txn, 'db> {
     db: lmdb::Database,
-    txn: &'a lmdb::RwTransaction<'a>,
+    txn: &'txn mut lmdb::RwTransaction<'db>,
 }
 
-impl BenchInserter for LmdbRkvBenchInserter<'_> {
+impl BenchInserter for LmdbRkvBenchInserter<'_, '_> {
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
-        // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
-        #[allow(clippy::cast_ref_to_mut)]
-        let mut_txn =
-            unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
-        mut_txn
+        self.txn
             .put(self.db, &key, &value, lmdb::WriteFlags::empty())
             .map_err(|_| ())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
-        // TODO: this might be UB, but I couldn't figure out how to fix the lifetimes without GATs
-        #[allow(clippy::cast_ref_to_mut)]
-        let mut_txn =
-            unsafe { &mut *(self.txn as *const lmdb::RwTransaction as *mut lmdb::RwTransaction) };
-        mut_txn.del(self.db, &key, None).map_err(|_| ())
+        self.txn.del(self.db, &key, None).map_err(|_| ())
     }
 }
 
-pub struct LmdbRkvBenchReadTransaction<'a> {
+pub struct LmdbRkvBenchReadTransaction<'db> {
     db: lmdb::Database,
-    txn: lmdb::RoTransaction<'a>,
+    txn: lmdb::RoTransaction<'db>,
 }
 
-impl<'a, 'b> BenchReadTransaction<'b> for LmdbRkvBenchReadTransaction<'a> {
-    type Output = &'b [u8];
+impl<'db> BenchReadTransaction for LmdbRkvBenchReadTransaction<'db> {
+    type T<'txn> = LmdbRkvBenchReader<'txn, 'db>
+    where
+        Self: 'txn;
 
-    fn get(&'b self, key: &[u8]) -> Option<&'b [u8]> {
+    fn get_reader(&self) -> Self::T<'_> {
+        LmdbRkvBenchReader {
+            db: self.db,
+            txn: &self.txn,
+        }
+    }
+}
+
+pub struct LmdbRkvBenchReader<'txn, 'db> {
+    db: lmdb::Database,
+    txn: &'txn lmdb::RoTransaction<'db>,
+}
+
+impl<'txn, 'db> BenchReader for LmdbRkvBenchReader<'txn, 'db> {
+    type Output<'b> = &'b [u8]
+    where
+        Self: 'b;
+
+    fn get(&self, key: &[u8]) -> Option<&[u8]> {
         use lmdb::Transaction;
         self.txn.get(self.db, &key).ok()
     }
 
-    fn exists_after(&'b self, key: &[u8]) -> bool {
+    fn exists_after(&self, key: &[u8]) -> bool {
         use lmdb::{Cursor, Transaction};
         self.txn
             .open_ro_cursor(self.db)
