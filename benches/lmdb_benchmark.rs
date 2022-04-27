@@ -139,25 +139,33 @@ fn benchmark<T: BenchDatabase>(mut db: T) -> Vec<(&'static str, Duration)> {
             results.push(("random reads", duration));
         }
 
-        for _ in 0..ITERATIONS {
-            let start = Instant::now();
-            let reader = txn.get_reader();
-            for i in &key_order {
-                let len = pairs.len();
-                let (key, _) = &mut pairs[i % len];
-                key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
-                reader.exists_after(key);
+        let start = Instant::now();
+        let reader = txn.get_reader();
+        let mut value_sum = 0;
+        let num_scan = 10;
+        for i in &key_order {
+            let len = pairs.len();
+            let (key, _) = &mut pairs[i % len];
+            key[16..].copy_from_slice(&(*i as u64).to_le_bytes());
+            let mut iter = reader.range_from(key);
+            for _ in 0..num_scan {
+                if let Some((_, value)) = iter.next() {
+                    value_sum += value.as_ref()[0];
+                } else {
+                    break;
+                }
             }
-            let end = Instant::now();
-            let duration = end - start;
-            println!(
-                "{}: Random range read {} starts in {}ms",
-                T::db_type_name(),
-                ELEMENTS,
-                duration.as_millis()
-            );
-            results.push(("random range reads", duration));
         }
+        assert!(value_sum > 0);
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "{}: Random range read {} elements in {}ms",
+            T::db_type_name(),
+            ELEMENTS * num_scan,
+            duration.as_millis()
+        );
+        results.push(("random range reads", duration));
     }
     drop(txn);
 

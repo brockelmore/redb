@@ -54,11 +54,21 @@ pub trait BenchReader {
     type Output<'a>: AsRef<[u8]> + 'a
     where
         Self: 'a;
+    type Iterator<'a>: BenchIterator
+    where
+        Self: 'a;
 
     fn get<'a>(&'a self, key: &[u8]) -> Option<Self::Output<'a>>;
 
-    // TODO: change this to a method that iterates over a range, for a more complete benchmark
-    fn exists_after(&self, key: &[u8]) -> bool;
+    fn range_from<'a>(&'a self, start: &'a [u8]) -> Self::Iterator<'a>;
+}
+
+pub trait BenchIterator {
+    type Output<'a>: AsRef<[u8]> + 'a
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)>;
 }
 
 pub struct RedbBenchDatabase<'db> {
@@ -118,13 +128,31 @@ impl<'txn> BenchReader for RedbBenchReader<'txn> {
     type Output<'a> = &'a [u8]
     where
         Self: 'a;
+    type Iterator<'a> = RedbBenchIterator<'a>
+    where
+        Self: 'a;
 
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
         self.table.get(key).unwrap()
     }
 
-    fn exists_after(&self, key: &[u8]) -> bool {
-        self.table.range(key..).unwrap().next().is_some()
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+        let iter = self.table.range(key..).unwrap();
+        RedbBenchIterator { iter }
+    }
+}
+
+pub struct RedbBenchIterator<'a> {
+    iter: redb::RangeIter<'a, [u8], [u8]>,
+}
+
+impl BenchIterator for RedbBenchIterator<'_> {
+    type Output<'a> = &'a [u8]
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next()
     }
 }
 
@@ -210,12 +238,15 @@ impl<'db, 'b> BenchReadTransaction for SledBenchReadTransaction<'db> {
     }
 }
 
-pub struct SledBenchReader<'a> {
-    db: &'a sled::Db,
+pub struct SledBenchReader<'db> {
+    db: &'db sled::Db,
 }
 
-impl<'a> BenchReader for SledBenchReader<'a> {
+impl<'db> BenchReader for SledBenchReader<'db> {
     type Output<'r> = sled::IVec
+    where
+        Self: 'r;
+    type Iterator<'r> = SledBenchIterator
     where
         Self: 'r;
 
@@ -223,8 +254,23 @@ impl<'a> BenchReader for SledBenchReader<'a> {
         self.db.get(key).unwrap()
     }
 
-    fn exists_after(&self, key: &[u8]) -> bool {
-        self.db.range(key..).next().is_some()
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
+        let iter = self.db.range(key..);
+        SledBenchIterator { iter }
+    }
+}
+
+pub struct SledBenchIterator {
+    iter: sled::Iter,
+}
+
+impl BenchIterator for SledBenchIterator {
+    type Output<'a> = sled::IVec
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next().map(|x| x.unwrap())
     }
 }
 
@@ -374,19 +420,33 @@ impl<'txn, 'db> BenchReader for LmdbRkvBenchReader<'txn, 'db> {
     type Output<'b> = &'b [u8]
     where
         Self: 'b;
+    type Iterator<'a> = LmdbRkvBenchIterator<'a>
+    where
+        Self: 'a;
 
     fn get(&self, key: &[u8]) -> Option<&[u8]> {
         use lmdb::Transaction;
         self.txn.get(self.db, &key).ok()
     }
 
-    fn exists_after(&self, key: &[u8]) -> bool {
+    fn range_from<'a>(&'a self, key: &'a [u8]) -> Self::Iterator<'a> {
         use lmdb::{Cursor, Transaction};
-        self.txn
-            .open_ro_cursor(self.db)
-            .unwrap()
-            .iter_from(key)
-            .next()
-            .is_some()
+        let iter = self.txn.open_ro_cursor(self.db).unwrap().iter_from(key);
+
+        LmdbRkvBenchIterator { iter }
+    }
+}
+
+pub struct LmdbRkvBenchIterator<'a> {
+    iter: lmdb::Iter<'a>,
+}
+
+impl BenchIterator for LmdbRkvBenchIterator<'_> {
+    type Output<'a> = &'a [u8]
+    where
+    Self: 'a;
+
+    fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
+        self.iter.next().map(|x| x.unwrap())
     }
 }
