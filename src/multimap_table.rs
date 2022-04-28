@@ -1,7 +1,5 @@
 use crate::tree_store::{Btree, BtreeMut, BtreeRangeIter, PageNumber, TransactionalMemory};
-use crate::types::{
-    AsBytesWithLifetime, RedbKey, RedbValue, RefAsBytesLifetime, RefLifetime, WithLifetime,
-};
+use crate::types::{RedbKey, RedbValue};
 use crate::{Result, WriteTransaction};
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -40,29 +38,39 @@ impl MultimapKeyCompareOp {
 /// key_len: u32
 /// key_data: length of key_len
 /// value_data:
-pub struct MultimapKVPair<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapKVPair<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
     data: Vec<u8>,
+    _lifetime: PhantomData<&'a ()>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> AsRef<MultimapKVPair<K, V>>
-    for MultimapKVPair<K, V>
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> AsRef<MultimapKVPair<'a, K, V>>
+    for MultimapKVPair<'a, K, V>
 {
-    fn as_ref(&self) -> &MultimapKVPair<K, V> {
+    fn as_ref(&self) -> &MultimapKVPair<'a, K, V> {
         self
     }
 }
 
-impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for MultimapKVPair<K, V> {
-    type View = RefLifetime<[u8]>;
-    type ToBytes = RefAsBytesLifetime<[u8]>;
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue
+    for MultimapKVPair<'a, K, V>
+{
+    type View<'b> = &'b [u8]
+    where
+        Self: 'b;
+    type AsBytes<'b> = &'b [u8]
+    where
+        Self: 'b;
 
-    fn from_bytes(data: &[u8]) -> <Self::View as WithLifetime>::Out {
+    fn from_bytes<'b>(data: &'b [u8]) -> Self::View<'b>
+    where
+        Self: 'b,
+    {
         data
     }
 
-    fn as_bytes(&self) -> <Self::ToBytes as AsBytesWithLifetime>::Out {
+    fn as_bytes(&self) -> &[u8] {
         &self.data
     }
 
@@ -71,7 +79,7 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbValue for Multi
     }
 }
 
-impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> RedbKey for MultimapKVPair<K, V> {
+impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> RedbKey for MultimapKVPair<'a, K, V> {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let kv1 = MultimapKVPairAccessor::<K, V>::new(data1);
         let kv2 = MultimapKVPairAccessor::<K, V>::new(data2);
@@ -112,10 +120,11 @@ impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> RedbKey for MultimapKVPair<K, V> 
     }
 }
 
-impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapKVPair<K, V> {
+impl<'a, K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapKVPair<'a, K, V> {
     fn new(data: Vec<u8>) -> Self {
         Self {
             data,
+            _lifetime: Default::default(),
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -128,6 +137,7 @@ impl<K: RedbKey + ?Sized, V: RedbKey + ?Sized> MultimapKVPair<K, V> {
         data.extend_from_slice(value.as_bytes().as_ref());
         Self {
             data,
+            _lifetime: Default::default(),
             _key_type: Default::default(),
             _value_type: Default::default(),
         }
@@ -213,8 +223,8 @@ fn make_inclusive_query_range<'a, K: RedbKey + ?Sized + 'a, T: RangeBounds<&'a K
 }
 
 fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
-    included_or_unbounded: Option<MultimapKVPair<K, V>>,
-) -> Bound<MultimapKVPair<K, V>> {
+    included_or_unbounded: Option<MultimapKVPair<'a, K, V>>,
+) -> Bound<MultimapKVPair<'a, K, V>> {
     if let Some(kv) = included_or_unbounded {
         Bound::Included(kv)
     } else {
@@ -224,17 +234,17 @@ fn make_bound<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a>(
 
 #[doc(hidden)]
 pub struct MultimapValueIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
-    inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
+    inner: BtreeRangeIter<'a, MultimapKVPair<'a, K, V>, [u8]>,
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'a, K, V> {
-    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>) -> Self {
+    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<'a, K, V>, [u8]>) -> Self {
         Self { inner }
     }
 
     // TODO: implement Iter when GATs are stable
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Option<<<V as RedbValue>::View as WithLifetime>::Out> {
+    pub fn next(&mut self) -> Option<<V as RedbValue>::View<'_>> {
         if let Some(entry) = self.inner.next() {
             let pair = MultimapKVPairAccessor::<K, V> {
                 data: entry.key(),
@@ -254,24 +264,17 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapValueIter<'
 
 #[doc(hidden)]
 pub struct MultimapRangeIter<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> {
-    inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>,
+    inner: BtreeRangeIter<'a, MultimapKVPair<'a, K, V>, [u8]>,
 }
 
 impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'a, K, V> {
-    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<K, V>, [u8]>) -> Self {
+    fn new(inner: BtreeRangeIter<'a, MultimapKVPair<'a, K, V>, [u8]>) -> Self {
         Self { inner }
     }
 
-    // TODO: Simplify this when GATs are stable
-    #[allow(clippy::type_complexity)]
     // TODO: implement Iter when GATs are stable
     #[allow(clippy::should_implement_trait)]
-    pub fn next(
-        &mut self,
-    ) -> Option<(
-        <<K as RedbValue>::View as WithLifetime>::Out,
-        <<V as RedbValue>::View as WithLifetime>::Out,
-    )> {
+    pub fn next(&mut self) -> Option<(<K as RedbValue>::View<'_>, <V as RedbValue>::View<'_>)> {
         if let Some(entry) = self.inner.next() {
             let pair = MultimapKVPairAccessor::<K, V> {
                 data: entry.key(),
@@ -294,10 +297,10 @@ impl<'a, K: RedbKey + ?Sized + 'a, V: RedbKey + ?Sized + 'a> MultimapRangeIter<'
 /// A multimap table
 ///
 /// [Multimap tables](https://en.wikipedia.org/wiki/Multimap) may have multiple values associated with each key
-pub struct MultimapTable<'db, 'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
+pub struct MultimapTable<'db, 'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn> {
     name: String,
     transaction: &'txn WriteTransaction<'db>,
-    tree: BtreeMut<'txn, MultimapKVPair<K, V>, [u8]>,
+    tree: BtreeMut<'txn, MultimapKVPair<'txn, K, V>, [u8]>,
     mem: &'db TransactionalMemory,
 }
 
@@ -427,8 +430,8 @@ pub trait ReadableMultimapTable<K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
 }
 
 /// A read-only multimap table
-pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> {
-    tree: Btree<'txn, MultimapKVPair<K, V>, [u8]>,
+pub struct ReadOnlyMultimapTable<'txn, K: RedbKey + ?Sized + 'txn, V: RedbKey + ?Sized + 'txn> {
+    tree: Btree<'txn, MultimapKVPair<'txn, K, V>, [u8]>,
 }
 
 impl<'txn, K: RedbKey + ?Sized, V: RedbKey + ?Sized> ReadOnlyMultimapTable<'txn, K, V> {

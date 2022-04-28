@@ -1,6 +1,6 @@
 use crate::tree_store::page_store::{Page, PageImpl, PageMut, TransactionalMemory};
 use crate::tree_store::PageNumber;
-use crate::types::{RedbKey, RedbValue, WithLifetime};
+use crate::types::{RedbKey, RedbValue};
 use crate::Result;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
@@ -113,8 +113,7 @@ impl<'a, V: RedbValue + ?Sized> AccessGuard<'a, V> {
         }
     }
 
-    // TODO: implement Deref instead of this to_value() method, when GAT is stable
-    pub fn to_value(&self) -> <<V as RedbValue>::View as WithLifetime>::Out {
+    pub fn to_value(&self) -> <V as RedbValue>::View<'_> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 }
