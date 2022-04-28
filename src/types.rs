@@ -20,6 +20,9 @@ pub trait RedbValue {
     fn as_bytes(&self) -> Self::AsBytes<'_>;
 
     /// Globally unique identifier for this type
+    ///
+    /// Note: this must uniquely identify the type, among all types which implement RedbValue.
+    /// It is recommended that implementors use the fully qualified name of their type
     fn redb_type_name() -> &'static str;
 }
 

@@ -1,4 +1,9 @@
-use redb::{Database, MultimapTableDefinition, RangeIter, ReadableTable, TableDefinition};
+#![feature(generic_associated_types)]
+use redb::{
+    Database, MultimapTableDefinition, RangeIter, ReadableTable, RedbKey, RedbValue,
+    TableDefinition,
+};
+use std::cmp::Ordering;
 use std::ops::{Range, RangeFull};
 use tempfile::NamedTempFile;
 
@@ -491,6 +496,65 @@ fn ref_get_signatures() {
     let mut iter = table.range([0u8].as_slice()..[10u8].as_slice()).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().1, &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn custom_ordering() {
+    struct ReverseKey(Vec<u8>);
+
+    impl RedbValue for ReverseKey {
+        type View<'a> = &'a [u8];
+        type AsBytes<'a> = &'a [u8]
+        where
+        Self: 'a;
+
+        fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+        where
+            Self: 'a,
+        {
+            data
+        }
+
+        fn as_bytes(&self) -> &[u8] {
+            &self.0
+        }
+
+        fn redb_type_name() -> &'static str {
+            "ReverseKey"
+        }
+    }
+
+    impl RedbKey for ReverseKey {
+        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            data2.cmp(data1)
+        }
+    }
+
+    let definition: TableDefinition<ReverseKey, [u8]> = TableDefinition::new("x");
+
+    let tmpfile: NamedTempFile = NamedTempFile::new().unwrap();
+    let db = unsafe { Database::create(tmpfile.path(), 1024 * 1024).unwrap() };
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..10u8 {
+            let key = vec![i];
+            table.insert(&ReverseKey(key), b"value").unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
+    let end = ReverseKey(vec![3u8]);
+    let mut iter = table.range(start..=end).unwrap();
+    for i in (3..=7u8).rev() {
+        let (key, value) = iter.next().unwrap();
+        assert_eq!(&[i], key);
+        assert_eq!(b"value", value);
     }
     assert!(iter.next().is_none());
 }
