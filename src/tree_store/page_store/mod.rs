@@ -9,5 +9,6 @@ mod utils;
 
 pub(crate) use base::PageNumber;
 pub(crate) use page_manager::{get_db_size, TransactionalMemory};
+pub(crate) use utils::drop_ref;
 
 pub(super) use base::{Page, PageImpl, PageMut};

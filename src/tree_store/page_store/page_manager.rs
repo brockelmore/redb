@@ -3,7 +3,7 @@ use crate::tree_store::page_store::grouped_bitmap::U64GroupedBitMapMut;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::mmap::Mmap;
 use crate::tree_store::page_store::utils::get_page_size;
-use crate::tree_store::page_store::{PageImpl, PageMut};
+use crate::tree_store::page_store::{drop_ref, PageImpl, PageMut};
 use crate::tree_store::PageNumber;
 use crate::Error;
 use crate::Result;
@@ -490,7 +490,7 @@ impl TransactionalMemory {
             mutator.set_last_committed_transaction_id(0);
             mutator.set_data_section_layout(&layout);
             mutator.set_version(FILE_FORMAT_VERSION);
-            drop(mutator);
+            drop_ref(mutator);
             // Make the state we just wrote the primary
             metadata.swap_primary();
 
@@ -498,7 +498,7 @@ impl TransactionalMemory {
             let mut mutator = metadata.secondary_slot_mut();
             mutator.set_data_section_layout(&layout);
             mutator.set_version(FILE_FORMAT_VERSION);
-            drop(mutator);
+            drop_ref(mutator);
 
             mmap.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
