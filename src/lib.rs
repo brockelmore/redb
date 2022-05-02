@@ -21,4 +21,4 @@ mod python;
 mod table;
 mod transactions;
 mod tree_store;
-mod types;
+pub mod types;
